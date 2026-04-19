@@ -122,24 +122,37 @@ def fetch_playoff_series() -> dict:
 
     # ── Attempt 2: aggregate game-by-game from scoreboard (multiple dates) ────
     try:
-        # Fetch recent dates covering the full first round window
         from datetime import date, timedelta
-        today = date.today()
-        game_wins: dict = {}   # frozenset(t1,t2) -> {team: wins}
 
-        for delta in range(14):   # look back up to 14 days
-            d = today - timedelta(days=delta)
+        # Only count games between teams in our known bracket matchups
+        VALID_SERIES_KEYS = {frozenset([m["team1"], m["team2"]]) for m in ALL_MATCHUPS}
+
+        # Playoffs started April 18, 2026 — don't look at earlier games
+        PLAYOFFS_START = date(2026, 4, 18)
+        today = date.today()
+
+        game_wins: dict = {}
+        seen_game_ids: set = set()
+
+        d = today
+        while d >= PLAYOFFS_START:
             url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
             params = {"seasontype": 3, "dates": d.strftime("%Y%m%d")}
             r = requests.get(url, params=params, timeout=8)
             if r.status_code != 200:
+                d -= timedelta(days=1)
                 continue
             data = r.json()
 
             for event in data.get("events", []):
+                game_id = event.get("id")
+                if game_id in seen_game_ids:
+                    continue
+
                 status = event.get("status", {}).get("type", {}).get("completed", False)
                 if not status:
-                    continue   # skip games not yet finished
+                    continue
+
                 comp = event["competitions"][0]
                 competitors = comp.get("competitors", [])
                 if len(competitors) != 2:
@@ -156,11 +169,18 @@ def fetch_playoff_series() -> dict:
                 if len(team_names) != 2 or not winner:
                     continue
 
-                key = frozenset(team_names)
-                if key not in game_wins:
-                    game_wins[key] = {team_names[0]: 0, team_names[1]: 0}
-                if winner in game_wins[key]:
-                    game_wins[key][winner] += 1
+                # Only count games that are part of a known playoff series
+                series_key = frozenset(team_names)
+                if series_key not in VALID_SERIES_KEYS:
+                    continue
+
+                seen_game_ids.add(game_id)
+                if series_key not in game_wins:
+                    game_wins[series_key] = {team_names[0]: 0, team_names[1]: 0}
+                if winner in game_wins[series_key]:
+                    game_wins[series_key][winner] += 1
+
+            d -= timedelta(days=1)
 
         for key, wins in game_wins.items():
             teams = list(wins.keys())
@@ -414,7 +434,8 @@ east_r1 = enrich_matchups(EAST_R1, live_series)
 west_r1 = enrich_matchups(WEST_R1, live_series)
 all_matchups_live = east_r1 + west_r1
 
-now_str = datetime.utcnow().strftime("%-I:%M %p UTC")
+now_dt  = datetime.utcnow()
+now_str = f"{now_dt.hour % 12 or 12}:{now_dt.minute:02d} {'AM' if now_dt.hour < 12 else 'PM'} UTC"
 if live_series:
     st.markdown(
         f"<p class='score-note'>🟢 Live scores loaded — auto-refreshes every 5 min "
